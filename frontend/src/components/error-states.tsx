@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react"
 import {
   AlertCircle,
   WifiOff,
@@ -10,7 +11,7 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { mapContractError, classifyError } from "@/lib/contract-errors"
-import { useWallet } from "@/hooks/use-wallet"
+import { useWallet, type WalletErrorCode } from "@/hooks/use-wallet"
 
 // ─── NetworkMismatchBanner ──────────────────────────────────────────────────
 
@@ -46,16 +47,25 @@ export function NetworkMismatchBanner() {
   return (
     <div className="bg-warning/15 border-warning/50 border-b px-4 py-3 text-sm">
       <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <AlertTriangle className="text-warning h-5 w-5 shrink-0" />
-          <span>
-            <strong>Network Mismatch:</strong> Your wallet is on{" "}
-            <span className="font-semibold underline">{networkName ?? "a different network"}</span>,
-            but Lernza expects <span className="font-semibold">{expectedNetworkName}</span>.
-          </span>
+        <div className="flex items-start gap-2">
+          <AlertTriangle className="text-warning mt-0.5 h-5 w-5 shrink-0" />
+          <div>
+            <span>
+              <strong>Network Mismatch:</strong> Your wallet is on{" "}
+              <span className="font-semibold underline">{networkName ?? "a different network"}</span>,
+              but Lernza expects <span className="font-semibold">{expectedNetworkName}</span>.
+            </span>
+            <ol className="mt-1.5 list-decimal space-y-0.5 pl-4 text-xs opacity-90">
+              <li>Click the Freighter icon in your browser toolbar.</li>
+              <li>Open the network dropdown at the top of the Freighter popup.</li>
+              <li>
+                Select <strong>{expectedNetworkName}</strong> from the list.
+              </li>
+              <li>Come back here — this page updates automatically once you switch.</li>
+            </ol>
+          </div>
         </div>
         <div className="flex items-center gap-2 text-xs">
-          <span>Switch networks in Freighter extension settings.</span>
           <a
             href={installUrl}
             target="_blank"
@@ -73,14 +83,95 @@ export function NetworkMismatchBanner() {
 
 // ─── WalletErrorAlert ─────────────────────────────────────────────────────────
 
+/** Step-by-step recovery guidance per wallet error type. */
+const RECOVERY_STEPS: Record<WalletErrorCode, string[]> = {
+  freighter_not_installed: [
+    "Install the Freighter browser extension using the button below.",
+    "Refresh this page once installation finishes.",
+    "Click \"Connect Wallet\" again.",
+  ],
+  missing_api: [
+    "Open the Freighter extension icon and check for a pending update.",
+    "Update Freighter to the latest version.",
+    "Reload this page and retry the connection below.",
+  ],
+  user_rejected: [
+    "Click retry below to reopen the Freighter connection prompt.",
+    "Approve the request in the Freighter popup.",
+    "If no popup appears, check it isn't hidden behind this browser window.",
+  ],
+  timeout: [
+    "Open the Freighter extension and confirm it's unlocked.",
+    "Check for a pending prompt left over from a previous attempt.",
+    "Click retry below once Freighter is unlocked and idle.",
+  ],
+  network_error: [
+    "Check your internet connection.",
+    "Confirm Freighter's extension icon is responsive.",
+    "Click retry below once connectivity is restored.",
+  ],
+  unknown: [
+    "Try reloading this page.",
+    "Make sure Freighter is unlocked and up to date.",
+    "Click retry below to attempt the connection again.",
+  ],
+}
+
+const BACKOFF_BASE_MS = 1500
+const BACKOFF_MAX_MS = 30_000
+
+/** Tracks retry attempts and the exponential-backoff cooldown between them. */
+function useRetryBackoff() {
+  const [attempt, setAttempt] = useState(0)
+  const [remainingMs, setRemainingMs] = useState(0)
+  const deadlineRef = useRef(0)
+
+  useEffect(() => {
+    if (remainingMs <= 0) return
+    const id = setInterval(() => {
+      setRemainingMs(Math.max(0, deadlineRef.current - Date.now()))
+    }, 250)
+    return () => clearInterval(id)
+  }, [remainingMs > 0])
+
+  const startCooldown = () => {
+    const delayMs = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** attempt)
+    setAttempt(a => a + 1)
+    deadlineRef.current = Date.now() + delayMs
+    setRemainingMs(delayMs)
+  }
+
+  const reset = () => {
+    setAttempt(0)
+    setRemainingMs(0)
+  }
+
+  return { attempt, remainingMs, startCooldown, reset }
+}
+
 export function WalletErrorAlert() {
   const { error, retryConnect, installUrl } = useWallet()
+  const { attempt, remainingMs, startCooldown, reset } = useRetryBackoff()
+
+  useEffect(() => {
+    if (!error) reset()
+    // Only reset when the error clears (e.g. a retry succeeded) — the
+    // backoff should keep growing across repeated failures of the same
+    // connection flow, not reset every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [!error])
 
   if (!error) return null
 
   const isNotInstalled = error.code === "freighter_not_installed"
-  const isRejected = error.code === "user_rejected"
-  const isTimeout = error.code === "timeout"
+  const steps = RECOVERY_STEPS[error.code]
+  const canRetry = remainingMs <= 0
+  const cooldownSeconds = Math.ceil(remainingMs / 1000)
+
+  const handleRetry = async () => {
+    startCooldown()
+    await retryConnect()
+  }
 
   return (
     <div className="bg-destructive/10 border-destructive animate-fade-in-down border p-4 shadow-sm">
@@ -89,6 +180,13 @@ export function WalletErrorAlert() {
         <div className="flex-1">
           <h4 className="text-sm font-semibold">Wallet Connection Error</h4>
           <p className="text-muted-foreground mt-1 text-xs">{error.message}</p>
+
+          <ol className="text-muted-foreground mt-2 list-decimal space-y-0.5 pl-4 text-xs">
+            {steps.map((step, i) => (
+              <li key={i}>{step}</li>
+            ))}
+          </ol>
+
           <div className="mt-3 flex flex-wrap items-center gap-2">
             {isNotInstalled ? (
               <a
@@ -101,9 +199,18 @@ export function WalletErrorAlert() {
                 <ExternalLink className="h-3 w-3" />
               </a>
             ) : (
-              <Button size="sm" onClick={retryConnect} className="h-8 text-xs">
+              <Button
+                size="sm"
+                onClick={handleRetry}
+                disabled={!canRetry}
+                className="h-8 text-xs"
+              >
                 <RefreshCw className="mr-1 h-3 w-3" />
-                {isTimeout || isRejected ? "Try Connecting Again" : "Retry"}
+                {canRetry
+                  ? attempt === 0
+                    ? "Try Connecting Again"
+                    : "Retry"
+                  : `Retry in ${cooldownSeconds}s`}
               </Button>
             )}
           </div>
