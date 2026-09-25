@@ -173,6 +173,10 @@ pub struct MilestoneInfo {
     pub difficulty: Option<String>,
     pub estimated_duration: Option<u32>,
     pub prerequisites_knowledge: Option<String>,
+    /// Optional per-milestone submission deadline (unix timestamp seconds).
+    /// Must not exceed the quest's own deadline — see #1652. `None` means
+    /// the milestone inherits the quest-level deadline only, as before.
+    pub deadline: Option<u64>,
 }
 
 #[contracttype]
@@ -279,6 +283,8 @@ pub enum Error {
     DisputeAlreadyResolved = 24,
     /// The submission is not eligible for dispute (e.g., not rejected, or already disputed).
     NotEligibleForDispute = 25,
+    /// A milestone deadline was set later than the quest's own deadline (#1652).
+    MilestoneDeadlineExceedsQuest = 26,
     /// Contract is administratively paused (shared code 400).
     Paused = 400,
 }
@@ -448,6 +454,7 @@ impl MilestoneContract {
             difficulty,
             estimated_duration,
             prerequisites_knowledge,
+            deadline: None,
         };
 
         let mut prerequisites = Vec::new(&env);
@@ -557,6 +564,7 @@ impl MilestoneContract {
             difficulty,
             estimated_duration,
             prerequisites_knowledge,
+            deadline: None,
         };
         let ms_key = DataKey::Milestone(quest_id, id);
         let prerequisite_key = DataKey::Prerequisites(quest_id, id);
@@ -641,6 +649,7 @@ impl MilestoneContract {
                 difficulty: ms.difficulty,
                 estimated_duration: ms.estimated_duration,
                 prerequisites_knowledge: ms.prerequisites_knowledge,
+                deadline: None,
             };
 
             let ms_key = DataKey::Milestone(quest_id, id);
@@ -711,6 +720,22 @@ impl MilestoneContract {
         }
         if reward_amount > MAX_REWARD_AMOUNT {
             return Err(Error::InvalidAmount);
+        }
+        Ok(())
+    }
+
+    /// Validates an optional per-milestone deadline against the quest's own
+    /// deadline. A milestone deadline must not exceed the quest deadline —
+    /// see #1652. A quest deadline of 0 means "no deadline", in which case
+    /// any milestone deadline is allowed.
+    fn validate_milestone_deadline(
+        quest_deadline: u64,
+        milestone_deadline: Option<u64>,
+    ) -> Result<(), Error> {
+        if let Some(deadline) = milestone_deadline {
+            if quest_deadline > 0 && deadline > quest_deadline {
+                return Err(Error::MilestoneDeadlineExceedsQuest);
+            }
         }
         Ok(())
     }
@@ -1242,6 +1267,14 @@ impl MilestoneContract {
             .get(&ms_key)
             .ok_or(Error::NotFound)?;
 
+        // Enforce the milestone's own deadline, if set, in addition to the
+        // quest-level deadline already checked above — see #1652.
+        if let Some(ms_deadline) = milestone.deadline {
+            if env.ledger().timestamp() > ms_deadline {
+                return Err(Error::DeadlineExpired);
+            }
+        }
+
         // Check if already completed
         let comp_key = DataKey::Completed(quest_id, milestone_id, enrollee.clone());
         if env.storage().persistent().has(&comp_key) {
@@ -1661,6 +1694,48 @@ impl MilestoneContract {
         );
         extend_instance_ttl(&env);
         Ok(released)
+    }
+
+    /// Set (or clear, with `None`) a milestone's own submission deadline.
+    /// Owner only. Must not exceed the quest's own deadline — see #1652.
+    /// A milestone with no deadline set here inherits the quest-level
+    /// deadline only, as before this feature existed.
+    pub fn set_milestone_deadline(
+        env: Env,
+        owner: Address,
+        quest_id: u32,
+        milestone_id: u32,
+        deadline: Option<u64>,
+    ) -> Result<(), Error> {
+        owner.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let quest_contract_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::QuestContract)
+            .ok_or(Error::NotInitialized)?;
+        let quest_client = QuestClient::new(&env, &quest_contract_addr);
+        let quest_info = quest_client.get_quest(&quest_id);
+        if quest_info.owner != owner {
+            return Err(Error::OwnerMismatch);
+        }
+
+        Self::validate_milestone_deadline(quest_info.deadline, deadline)?;
+
+        let ms_key = DataKey::Milestone(quest_id, milestone_id);
+        let mut milestone: MilestoneInfo = env
+            .storage()
+            .persistent()
+            .get(&ms_key)
+            .ok_or(Error::NotFound)?;
+
+        milestone.deadline = deadline;
+        env.storage().persistent().set(&ms_key, &milestone);
+        Self::bump_ms(&env, &ms_key);
+        extend_instance_ttl(&env);
+
+        Ok(())
     }
 
     /// Get a specific milestone.
