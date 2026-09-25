@@ -29,13 +29,9 @@ import { milestoneClient } from "@/lib/contracts/milestone"
 import { rewardsClient } from "@/lib/contracts/rewards"
 import type { QuestInfo, CategoryInfo } from "@/lib/contract-types"
 import { useQuestStatsMap } from "@/hooks/use-quest-stats"
-import { formatTokens } from "@/lib/utils"
+import { formatTokens, getQuestLifecycleStatus } from "@/lib/utils"
 import { navigateToPath } from "@/lib/navigation"
 import { useOnboarding } from "@/hooks/use-onboarding"
-import {
-  handleQuestCardGridKeyDown,
-  handleQuestCardKeyDown,
-} from "@/lib/quest-card-keyboard"
 
 // Sub-components
 import { PersonalProgress } from "./dashboard/personal-progress"
@@ -49,7 +45,7 @@ const DASHBOARD_LOAD_MORE_SIZE = 20
 const TRENDING_QUEST_LIMIT = 2
 const RECENT_ACTIVITY_LIMIT = 5
 
-type QuestDiscoveryStatus = "all" | "active" | "upcoming" | "completed"
+type QuestDiscoveryStatus = "all" | "active" | "completed"
 
 interface DashboardProps {
   onSelectQuest?: (id: number) => void
@@ -220,17 +216,6 @@ export function Dashboard(
     }
   }, [publicQuests])
 
-  // Cache the latest quest list for offline viewing (#1626). Runs on every
-  // successful fetch; failures inside the cache helper are swallowed so the
-  // online path is never affected.
-  useEffect(() => {
-    if (accessibleQuests.length > 0) {
-      void import("@/lib/offline-quest-cache").then(({ saveQuestsForOffline }) =>
-        saveQuestsForOffline(accessibleQuests)
-      )
-    }
-  }, [accessibleQuests])
-
   // Fetch the next page of public quests from the contract and append it.
   const loadMorePublic = useCallback(async () => {
     const loaded = publicQuests.length + extraPublicQuests.length
@@ -298,16 +283,16 @@ export function Dashboard(
   const availableCreators = Array.from(new Set(filteredQuests.map(q => q.owner))).sort()
   const availableRewardTokens = Array.from(new Set(filteredQuests.map(q => q.tokenAddr))).sort()
 
-  // Derive quest status from on-chain state
-  function deriveQuestStatus(q: {
-    status: number
-    deadline: number
-    archivedAt?: number
-  }): QuestDiscoveryStatus {
-    if (q.status === 1 || q.status === 2) return "completed" // Archived or Cancelled
-    if (q.deadline > 0 && q.deadline < nowSeconds) return "completed"
-    if (q.deadline > 0 && q.deadline > nowSeconds) return "upcoming"
-    return "active"
+  // Derive quest status from on-chain state via the single shared
+  // lifecycle-status function (see lib/utils.ts's getQuestLifecycleStatus doc
+  // comment) instead of reimplementing the active/expired/archived/cancelled
+  // logic locally with its own edge cases.
+  function deriveQuestStatus(q: { status: number; deadline: number }): QuestDiscoveryStatus {
+    const lifecycle = getQuestLifecycleStatus({
+      status: q.status as QuestInfo["status"],
+      deadline: q.deadline,
+    })
+    return lifecycle === "active" ? "active" : "completed"
   }
 
   const statusFilteredQuests =
@@ -659,7 +644,6 @@ export function Dashboard(
                   [
                     { value: "all", label: "All status" },
                     { value: "active", label: "Active" },
-                    { value: "upcoming", label: "Upcoming" },
                     { value: "completed", label: "Completed" },
                   ] as const
                 ).map(s => (
@@ -755,13 +739,7 @@ export function Dashboard(
 
               {(isLoading || questStatsLoading) && <SkeletonQuestList className="mb-5" count={3} />}
 
-              <div
-                className="relative grid grid-cols-1 gap-4 sm:gap-5 md:grid-cols-2 lg:grid-cols-1"
-                role="list"
-                aria-label="Available quests. Use arrow keys to move between quest cards."
-                data-quest-card-group
-                onKeyDown={handleQuestCardGridKeyDown}
-              >
+              <div className="relative grid grid-cols-1 gap-4 sm:gap-5 md:grid-cols-2 lg:grid-cols-1">
                 {visibleQuests.map((ws, i) => {
                   const stats = questStats[ws.id] || {
                     enrolleeCount: 0,
@@ -787,14 +765,10 @@ export function Dashboard(
                     <button
                       key={ws.id}
                       type="button"
-                      role="listitem"
-                      tabIndex={0}
-                      data-quest-card
                       onClick={() => goToQuest(ws.id)}
-                      onKeyDown={handleQuestCardKeyDown}
                       aria-label={`Open quest ${ws.name}`}
                       data-onboarding={i === 0 ? "quest-card" : undefined}
-                      className={`card-tilt group animate-fade-in-up cursor-pointer stagger-${i + 1} focus-visible:ring-ring w-full text-left focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none`}
+                      className={`card-tilt group animate-fade-in-up cursor-pointer stagger-${i + 1} focus-visible:ring-ring w-full text-left focus-visible:ring-2 focus-visible:outline-none`}
                     >
                       <Card>
                         <CardHeader className="pb-3">
