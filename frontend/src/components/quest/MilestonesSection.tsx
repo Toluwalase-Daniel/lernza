@@ -1,8 +1,8 @@
-import { useState } from "react"
-import { CheckCircle2, Circle, Coins, Lock, Plus } from "lucide-react"
+import { useEffect, useState } from "react"
+import { CheckCircle2, Circle, Clock, Coins, Lock, Plus } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { cn } from "@/lib/utils"
+import { cn, formatDeadlineLabel, isExpiredDeadline, isExpiringSoon } from "@/lib/utils"
 import { MilestoneSubmitDialog, type SubmissionEvidence } from "./MilestoneSubmitDialog"
 
 interface Milestone {
@@ -11,6 +11,32 @@ interface Milestone {
   description?: string
   rewardAmount: number
   prerequisiteIds?: number[]
+  /** Optional per-milestone submission deadline (unix seconds) — see #1652. */
+  deadline?: number
+}
+
+/** Live countdown badge for a milestone's own deadline, if it has one. */
+function MilestoneCountdown({ deadline }: { deadline: number }) {
+  const [label, setLabel] = useState(() => formatDeadlineLabel(deadline))
+
+  useEffect(() => {
+    const id = setInterval(() => setLabel(formatDeadlineLabel(deadline)), 30_000)
+    return () => clearInterval(id)
+  }, [deadline])
+
+  const expired = isExpiredDeadline(deadline)
+  const soon = !expired && isExpiringSoon(deadline)
+
+  return (
+    <span
+      className={cn(
+        "flex items-center gap-1 text-xs font-semibold",
+        expired ? "text-destructive" : soon ? "text-warning" : "text-muted-foreground"
+      )}
+    >
+      <Clock className="h-3 w-3" /> {label}
+    </span>
+  )
 }
 
 interface Completion {
@@ -170,6 +196,9 @@ export function MilestonesSection({
                   <span className="text-muted-foreground flex items-center gap-1 text-xs font-semibold">
                     <Coins className="h-3 w-3" /> {milestone.rewardAmount} USDC
                   </span>
+                  {!isCompleted && milestone.deadline !== undefined && milestone.deadline > 0 && (
+                    <MilestoneCountdown deadline={milestone.deadline} />
+                  )}
                 </div>
 
                 {!isCompleted && !isLocked && (

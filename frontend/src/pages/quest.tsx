@@ -357,6 +357,7 @@ export function QuestView({ questId, onBack }: QuestViewProps) {
     description: m.description,
     rewardAmount: Number(m.rewardAmount),
     prerequisiteIds: m.prerequisiteIds,
+    deadline: m.deadline,
   }))
 
   return (
