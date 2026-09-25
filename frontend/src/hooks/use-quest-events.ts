@@ -27,6 +27,12 @@ type EventTopicKey =
   | "quest_ttl_extended"
   | "distribution_mode_set"
   | "reward_refunded"
+  | "milestone_partial"
+  | "pending_reward_released"
+  | "certificate_mint_failed"
+  | "milestone_feedback"
+  | "dispute_initiated"
+  | "dispute_resolved"
 
 const POLL_INTERVAL_MS = 10_000
 
@@ -102,6 +108,11 @@ export interface ParsedEvent {
   flatReward?: bigint
   actor?: string
   authority?: string
+  criteriaMet?: number
+  maxCriteria?: number
+  reviewer?: string
+  action?: number
+  outcome?: number
 }
 
 export function parseEvent(event: rpc.Api.EventResponse): ParsedEvent | null {
@@ -255,6 +266,71 @@ export function parseEvent(event: rpc.Api.EventResponse): ParsedEvent | null {
       txHash: event.txHash,
     }
   }
+  if (matchTopic(event, "milestone_partial")) {
+    return {
+      type: "milestone_partial",
+      questId: decodeScValU32(vals[0]),
+      milestoneId: decodeScValU32(vals[1]),
+      enrollee: decodeScValAddress(vals[2]),
+      criteriaMet: decodeScValU32(vals[3]),
+      maxCriteria: decodeScValU32(vals[4]),
+      amount: decodeScValI128(vals[5]),
+      ledger: event.ledger,
+      txHash: event.txHash,
+    }
+  }
+  if (matchTopic(event, "pending_reward_released")) {
+    return {
+      type: "pending_reward_released",
+      questId: decodeScValU32(vals[0]),
+      enrollee: decodeScValAddress(vals[1]),
+      amount: decodeScValI128(vals[2]),
+      ledger: event.ledger,
+      txHash: event.txHash,
+    }
+  }
+  if (matchTopic(event, "certificate_mint_failed")) {
+    return {
+      type: "certificate_mint_failed",
+      questId: decodeScValU32(vals[0]),
+      enrollee: decodeScValAddress(vals[1]),
+      ledger: event.ledger,
+      txHash: event.txHash,
+    }
+  }
+  if (matchTopic(event, "milestone_feedback")) {
+    return {
+      type: "milestone_feedback",
+      questId: decodeScValU32(vals[0]),
+      milestoneId: decodeScValU32(vals[1]),
+      enrollee: decodeScValAddress(vals[2]),
+      reviewer: decodeScValAddress(vals[3]),
+      action: decodeScValU32(vals[4]),
+      ledger: event.ledger,
+      txHash: event.txHash,
+    }
+  }
+  if (matchTopic(event, "dispute_initiated")) {
+    return {
+      type: "dispute_initiated",
+      questId: decodeScValU32(vals[0]),
+      milestoneId: decodeScValU32(vals[1]),
+      enrollee: decodeScValAddress(vals[2]),
+      ledger: event.ledger,
+      txHash: event.txHash,
+    }
+  }
+  if (matchTopic(event, "dispute_resolved")) {
+    return {
+      type: "dispute_resolved",
+      questId: decodeScValU32(vals[0]),
+      milestoneId: decodeScValU32(vals[1]),
+      enrollee: decodeScValAddress(vals[2]),
+      outcome: decodeScValU32(vals[3]),
+      ledger: event.ledger,
+      txHash: event.txHash,
+    }
+  }
 
   return null
 }
@@ -301,6 +377,12 @@ export async function fetchQuestHistory(questId: number): Promise<ParsedEvent[]>
     { topics: [[topicHex("quest_cancelled")]], contractIds },
     { topics: [[topicHex("peer_approved")]], contractIds },
     { topics: [[topicHex("certificate_minted")]], contractIds },
+    { topics: [[topicHex("milestone_partial")]], contractIds },
+    { topics: [[topicHex("pending_reward_released")]], contractIds },
+    { topics: [[topicHex("certificate_mint_failed")]], contractIds },
+    { topics: [[topicHex("milestone_feedback")]], contractIds },
+    { topics: [[topicHex("dispute_initiated")]], contractIds },
+    { topics: [[topicHex("dispute_resolved")]], contractIds },
   ]
 
   try {
@@ -445,11 +527,66 @@ export function useQuestEventStream(enabled: boolean) {
             })
             break
           case "reward_refunded":
+            notifyRewardDistribution(
+              parsed.amount ? formatAmount(parsed.amount) : "reward",
+              "refunded"
+            )
+            break
+          case "milestone_partial":
+            notifyMilestoneCompletion(
+              `Milestone #${parsed.milestoneId ?? "?"} (Quest #${parsed.questId})`,
+              "approved"
+            )
             addToast({
-              title: "Reward Refunded",
-              message: `Reward refunded for quest #${parsed.questId}.`,
-              type: "success",
-              category: "reward",
+              title: "Partial Credit Awarded",
+              message: `${parsed.criteriaMet ?? "?"}/${parsed.maxCriteria ?? "?"} criteria met on milestone #${parsed.milestoneId ?? "?"}.`,
+              type: "info",
+              category: "milestone",
+            })
+            break
+          case "pending_reward_released":
+            notifyRewardDistribution(
+              parsed.amount ? formatAmount(parsed.amount) : "reward",
+              "claimed"
+            )
+            break
+          case "certificate_mint_failed":
+            addToast({
+              title: "Certificate Mint Failed",
+              message: `Certificate minting failed for ${shortenAddress(parsed.enrollee ?? "")} on quest #${parsed.questId}. It can be retried.`,
+              type: "error",
+              category: "milestone",
+            })
+            break
+          case "milestone_feedback": {
+            const actionLabel =
+              parsed.action === 0 ? "approved" : parsed.action === 1 ? "rejected" : "requested changes on"
+            notifyMilestoneCompletion(
+              `Milestone #${parsed.milestoneId ?? "?"} (Quest #${parsed.questId})`,
+              parsed.action === 0 ? "approved" : parsed.action === 1 ? "rejected" : "submitted"
+            )
+            addToast({
+              title: "Milestone Feedback",
+              message: `Reviewer ${actionLabel} milestone #${parsed.milestoneId ?? "?"}.`,
+              type: parsed.action === 0 ? "success" : parsed.action === 1 ? "warning" : "info",
+              category: "milestone",
+            })
+            break
+          }
+          case "dispute_initiated":
+            addToast({
+              title: "Dispute Initiated",
+              message: `A dispute was opened on milestone #${parsed.milestoneId ?? "?"} (Quest #${parsed.questId}).`,
+              type: "warning",
+              category: "milestone",
+            })
+            break
+          case "dispute_resolved":
+            addToast({
+              title: "Dispute Resolved",
+              message: `Dispute on milestone #${parsed.milestoneId ?? "?"} (Quest #${parsed.questId}) resolved as ${parsed.outcome === 1 ? "overturned" : "upheld"}.`,
+              type: parsed.outcome === 1 ? "success" : "info",
+              category: "milestone",
             })
             break
         }
@@ -476,6 +613,12 @@ export function useQuestEventStream(enabled: boolean) {
       { topics: [[topicHex("quest_cancelled")]], contractIds },
       { topics: [[topicHex("peer_approved")]], contractIds },
       { topics: [[topicHex("certificate_minted")]], contractIds },
+      { topics: [[topicHex("milestone_partial")]], contractIds },
+      { topics: [[topicHex("pending_reward_released")]], contractIds },
+      { topics: [[topicHex("certificate_mint_failed")]], contractIds },
+      { topics: [[topicHex("milestone_feedback")]], contractIds },
+      { topics: [[topicHex("dispute_initiated")]], contractIds },
+      { topics: [[topicHex("dispute_resolved")]], contractIds },
     ]
 
     try {
