@@ -22,9 +22,8 @@ import { SmartError } from "@/components/error-states"
 import { questClient } from "@/lib/contracts/quest"
 import { rewardsClient } from "@/lib/contracts/rewards"
 import { milestoneClient } from "@/lib/contracts/milestone-client"
-import { formatTokens } from "@/lib/utils"
+import { formatTokens, getQuestLifecycleStatus } from "@/lib/utils"
 import type { QuestInfo } from "@/lib/contract-types"
-import { QuestStatus } from "@/lib/contract-types"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -64,9 +63,13 @@ async function fetchPlatformStats(): Promise<PlatformStats> {
     if (batch.length < pageSize) break
   }
 
-  const activeQuests = quests.filter(q => q.status === QuestStatus.Active).length
-  const archivedQuests = quests.filter(q => q.status === QuestStatus.Archived).length
-  const cancelledQuests = quests.filter(q => q.status === QuestStatus.Cancelled).length
+  // Derived via the shared lifecycle-status function so a quest whose
+  // deadline has passed but was never explicitly archived isn't miscounted
+  // as still "active" (see lib/utils.ts's getQuestLifecycleStatus).
+  const lifecycleStatuses = quests.map(q => getQuestLifecycleStatus(q))
+  const activeQuests = lifecycleStatuses.filter(s => s === "active").length
+  const archivedQuests = lifecycleStatuses.filter(s => s === "archived").length
+  const cancelledQuests = lifecycleStatuses.filter(s => s === "cancelled").length
 
   return {
     totalQuests: questCount,
