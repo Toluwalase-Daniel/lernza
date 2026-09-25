@@ -20,6 +20,7 @@ const MILESTONE_ERROR_MESSAGES: Record<number, string> = {
   8: "Milestone contract is not configured.",
   12: "This learner is not enrolled in the quest.",
   14: "Complete the previous milestone first.",
+  26: "A milestone deadline cannot be later than the quest's own deadline.",
 }
 
 export interface MilestoneInfo {
@@ -33,6 +34,8 @@ export interface MilestoneInfo {
   difficulty?: string
   estimatedDuration?: number
   prerequisitesKnowledge?: string
+  /** Optional per-milestone submission deadline (unix seconds) — see #1652. */
+  deadline?: number
 }
 
 export type FeedbackAction = "Approve" | "Reject" | "RequestChanges"
@@ -208,6 +211,28 @@ export class MilestoneClient {
     return this.normalizeTransactionResult(await signAndSubmitTracked(tx, "Create Milestone", handlers))
   }
 
+  /**
+   * Sets (or clears, passing `undefined`) a milestone's own submission
+   * deadline. Owner only; rejected if it exceeds the quest's own deadline.
+   */
+  async setMilestoneDeadline(
+    owner: string,
+    questId: number,
+    milestoneId: number,
+    deadline: number | undefined,
+    handlers?: TransactionLifecycleHandlers
+  ): Promise<TransactionResult> {
+    const tx = await this.buildTx(owner, "set_milestone_deadline", [
+      new Address(owner).toScVal(),
+      nativeToScVal(questId, { type: "u32" }),
+      nativeToScVal(milestoneId, { type: "u32" }),
+      nativeToScVal(deadline ?? null, { type: "u64" }),
+    ])
+    return this.normalizeTransactionResult(
+      await signAndSubmitTracked(tx, "Set Milestone Deadline", handlers)
+    )
+  }
+
   async verifyCompletion(
     owner: string,
     questId: number,
@@ -364,6 +389,7 @@ export class MilestoneClient {
       difficulty: record.difficulty ? String(record.difficulty) : undefined,
       estimatedDuration: record.estimated_duration ? Number(record.estimated_duration) : undefined,
       prerequisitesKnowledge: record.prerequisites_knowledge ? String(record.prerequisites_knowledge) : undefined,
+      deadline: record.deadline ? Number(record.deadline) : undefined,
       prerequisiteIds: Array.isArray(record.prerequisite_ids)
         ? record.prerequisite_ids.map(Number)
         : [],
